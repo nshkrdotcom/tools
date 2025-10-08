@@ -38,9 +38,9 @@ defmodule Actions.CheckUncommitted do
         has_changes = check_uncommitted(repo)
 
         if has_changes do
-          IO.puts("✗ #{repo_name} - has uncommitted changes")
+          IO.puts("\e[1;31m✗ #{repo_name} - has uncommitted changes\e[0m")
         else
-          IO.puts("✓ #{repo_name} - clean")
+          IO.puts("\e[32m✓ #{repo_name} - clean\e[0m")
         end
 
         has_changes
