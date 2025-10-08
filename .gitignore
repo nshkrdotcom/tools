@@ -1,0 +1,15 @@
+# Generated repo lists
+repos.json
+repos_exclude.json
+repos_filtered.json
+
+# Elixir
+/_build/
+/deps/
+/*.ez
+erl_crash.dump
+*.beam
+
+# Mix
+.fetch
+mix.lock
