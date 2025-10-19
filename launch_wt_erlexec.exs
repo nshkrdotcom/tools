@@ -11,8 +11,8 @@ defmodule LaunchWTErlexec do
     wt_path = locate!("wt.exe")
 
     tabs = [
-      ~s[echo "Tab 1 ready"; pwd],
-      ~s[echo "Tab 2 starting..."; echo "Current directory:"; pwd; echo "Listing files:"; ls -la; echo "System info:"; uname -a; echo "Done!"]
+      ~s[echo "elixir command!"],
+      ~s[echo "elixir command!"]
     ]
 
     IO.puts("Launching Windows Terminal via #{wt_path}...")
@@ -43,22 +43,6 @@ defmodule LaunchWTErlexec do
     end
   end
 
-  defp open_all_tabs(wt_path, window_target, tabs) do
-    tabs
-    |> Enum.with_index(1)
-    |> Enum.reduce_while(:ok, fn {command, index}, :ok ->
-      IO.puts("  - Tab #{index}: #{command_label(command)}")
-
-      case open_tab_with_command(wt_path, window_target, command) do
-        {:ok, _streams} ->
-          {:cont, :ok}
-
-        {:error, reason} ->
-          {:halt, {:error, {:tab_failed, index, reason}}}
-      end
-    end)
-  end
-
   defp open_tab_with_command(wt_path, window_target, command) do
     args = ["-w", window_target, "new-tab"] ++ command_args(command)
     run_with_retry(fn -> run_wt_command(wt_path, args) end, @max_tab_attempts)
@@ -72,7 +56,7 @@ defmodule LaunchWTErlexec do
     |> Enum.reduce_while(:ok, fn {command, index}, :ok ->
       IO.puts("  - Tab #{index}: #{command_label(command)}")
 
-      case open_additional_tab(wt_path, window_target, command) do
+      case open_tab_with_command(wt_path, window_target, command) do
         {:ok, _streams} ->
           {:cont, :ok}
 
@@ -84,11 +68,6 @@ defmodule LaunchWTErlexec do
       {:error, reason} -> {:error, reason}
       _ -> :ok
     end
-  end
-
-  defp open_additional_tab(wt_path, window_target, command) do
-    args = ["-w", window_target, "new-tab"] ++ command_args(command)
-    run_with_retry(fn -> run_wt_command(wt_path, args) end, @max_tab_attempts)
   end
 
   defp run_with_retry(fun, max_attempts), do: run_with_retry(fun, max_attempts, 1)
@@ -185,17 +164,6 @@ defmodule LaunchWTErlexec do
 
   defp command_args(nil), do: blank_tab_args()
 
-  defp command_args_for_new_window(command) do
-    script_or_placeholder = prepare_command_command(command)
-
-    [
-      wsl_executable(),
-      "--exec",
-      bash_executable(),
-      script_or_placeholder
-    ]
-  end
-
   defp command_args(command) do
     script_or_placeholder = prepare_command_command(command)
 
@@ -259,184 +227,6 @@ defmodule LaunchWTErlexec do
     end
   end
 
-  defp autoguess_wsl_profile do
-    settings_candidates()
-    |> Enum.reduce_while({:error, :settings_not_found}, fn path, acc ->
-      case extract_profile_from_settings(path) do
-        {:ok, profile} -> {:halt, {:ok, profile}}
-        _ -> {:cont, acc}
-      end
-    end)
-  end
-
-  defp extract_profile_from_settings(path) do
-    cond do
-      not File.regular?(path) ->
-        {:error, :no_file}
-
-      true ->
-        with {:ok, profile} <- extract_profile_with_jq(path) do
-          {:ok, profile}
-        else
-          _ ->
-            fallback_profile_from_file(path)
-        end
-    end
-  end
-
-  defp extract_profile_with_jq(path) do
-    case System.find_executable("jq") do
-      nil ->
-        {:error, :jq_missing}
-
-      jq ->
-        filter =
-          "(.profiles.list // .profiles // [])" <>
-            " | map(select(((.source? // \"\") | ascii_downcase | test(\"wsl\"))" <>
-            " or ((.name? // \"\") | ascii_downcase | test(\"ubuntu\"))" <>
-            " or ((.commandline? // \"\") | ascii_downcase | test(\"wsl\"))))" <>
-            " | map(.guid // .name)[]"
-
-        case System.cmd(jq, ["-r", filter, path]) do
-          {output, 0} ->
-            output
-            |> String.split("\n", trim: true)
-            |> Enum.find(&(&1 != "" and &1 != "null"))
-            |> case do
-              nil -> {:error, :no_match}
-              value -> {:ok, value}
-            end
-
-          _ ->
-            {:error, :jq_failure}
-        end
-    end
-  end
-
-  defp fallback_profile_from_file(path) do
-    case File.read(path) do
-      {:ok, contents} ->
-        downcased = String.downcase(contents)
-
-        with {:ok, value} <- extract_guid_near_source(contents, downcased),
-             true <- value != "" do
-          {:ok, value}
-        else
-          _ ->
-            case extract_guid_near_name(contents, downcased) do
-              {:ok, value} when value != "" -> {:ok, value}
-              _ -> {:error, :no_wsl_profile}
-            end
-        end
-
-      error ->
-        error
-    end
-  end
-
-  defp extract_guid_near_source(contents, downcased) do
-    regex = ~r/"guid"\s*:\s*"([^"]+)"[\s\S]*?"source"\s*:\s*"([^"]*)"/
-
-    contents
-    |> Regex.scan(regex)
-    |> Enum.zip(Regex.scan(regex, downcased))
-    |> Enum.find_value(fn {[_full, guid, _source], [_f2, _guid2, source_down]} ->
-      if String.contains?(source_down, "wsl") or String.contains?(source_down, "canonical") do
-        {:ok, guid}
-      else
-        nil
-      end
-    end)
-    |> case do
-      nil -> {:error, :no_match}
-      result -> result
-    end
-  end
-
-  defp extract_guid_near_name(contents, downcased) do
-    regex = ~r/"guid"\s*:\s*"([^"]+)"[\s\S]*?"name"\s*:\s*"([^"]+)"/
-
-    contents
-    |> Regex.scan(regex)
-    |> Enum.zip(Regex.scan(regex, downcased))
-    |> Enum.find_value(fn {[_full, guid, _name], [_f2, _guid2, name_down]} ->
-      if String.contains?(name_down, "ubuntu") or String.contains?(name_down, "wsl") do
-        {:ok, guid}
-      else
-        nil
-      end
-    end)
-    |> case do
-      nil -> {:error, :no_match}
-      result -> result
-    end
-  end
-
-  defp settings_candidates do
-    env = System.get_env("WT_SETTINGS_PATH")
-
-    explicit =
-      case env do
-        nil -> []
-        _ -> [Path.expand(env)]
-      end
-
-    from_localappdata =
-      case resolve_localappdata() do
-        {:ok, localappdata} ->
-          [
-            Path.join([
-              localappdata,
-              "Packages",
-              "Microsoft.WindowsTerminal_8wekyb3d8bbwe",
-              "LocalState",
-              "settings.json"
-            ])
-          ]
-
-        _ ->
-          []
-      end
-
-    from_env_user =
-      case System.get_env("WT_WINDOWS_USER") || System.get_env("USERNAME") do
-        nil ->
-          []
-
-        user ->
-          [
-            Path.join([
-              "/mnt/c/Users",
-              user,
-              "AppData/Local/Packages",
-              "Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json"
-            ])
-          ]
-      end
-
-    from_users_folder =
-      case File.ls("/mnt/c/Users") do
-        {:ok, entries} ->
-          entries
-          |> Enum.reject(&String.starts_with?(&1, "."))
-          |> Enum.map(fn user ->
-            Path.join([
-              "/mnt/c/Users",
-              user,
-              "AppData/Local/Packages",
-              "Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json"
-            ])
-          end)
-
-        _ ->
-          []
-      end
-
-    (explicit ++ from_localappdata ++ from_env_user ++ from_users_folder)
-    |> Enum.filter(& &1)
-    |> Enum.uniq()
-  end
-
   defp command_label(nil), do: "default shell"
   defp command_label(command), do: "command: #{String.trim(command)}"
 
@@ -485,52 +275,6 @@ defmodule LaunchWTErlexec do
       ~s("#{escaped}")
     else
       arg
-    end
-  end
-
-  defp resolve_localappdata do
-    cond do
-      path = System.get_env("WT_LOCALAPPDATA") ->
-        {:ok, Path.expand(path)}
-
-      path = System.get_env("LOCALAPPDATA") ->
-        {:ok, Path.expand(path)}
-
-      true ->
-        with {:ok, win_path} <- windows_env("LOCALAPPDATA"),
-             {:ok, wsl_path} <- windows_to_wsl(win_path) do
-          {:ok, wsl_path}
-        else
-          _ -> {:error, :unavailable}
-        end
-    end
-  end
-
-  defp windows_env(var) do
-    script_path = Path.expand("scripts/get_windows_env.sh", File.cwd!())
-
-    cond do
-      not File.exists?(script_path) ->
-        {:error, :script_missing}
-
-      true ->
-        case System.cmd(script_path, [var]) do
-          {value, 0} ->
-            {:ok, String.trim(value)}
-
-          {_value, _} ->
-            {:error, :not_found}
-        end
-    end
-  end
-
-  defp windows_to_wsl(path) do
-    case System.cmd("wslpath", ["-u", path]) do
-      {value, 0} ->
-        {:ok, String.trim(value)}
-
-      _ ->
-        {:error, :conversion_failed}
     end
   end
 end
