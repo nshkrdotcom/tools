@@ -17,9 +17,9 @@ defmodule LaunchWTErlexec do
 
     IO.puts("Launching Windows Terminal via #{wt_path}...")
 
-    # Create a new window first (empty)
-    with {:ok, window_target} <- create_empty_window(wt_path),
-         :ok <- open_all_tabs(wt_path, window_target, tabs) do
+    # Create a new window with the first tab, then add remaining tabs
+    with {:ok, window_target} <- create_window_with_first_tab(wt_path, hd(tabs)),
+         :ok <- open_remaining_tabs(wt_path, window_target, tl(tabs)) do
       IO.puts("All tabs opened successfully.")
     else
       {:error, reason} ->
@@ -28,9 +28,9 @@ defmodule LaunchWTErlexec do
     end
   end
 
-  defp create_empty_window(wt_path) do
-    IO.puts("  - Creating new window...")
-    args = ["-w", "new"]
+  defp create_window_with_first_tab(wt_path, command) do
+    IO.puts("  - Tab 1: #{command_label(command)}")
+    args = ["-w", "new", "new-tab"] ++ command_args(command)
 
     case run_wt_command(wt_path, args) do
       {:ok, streams} ->
@@ -39,7 +39,7 @@ defmodule LaunchWTErlexec do
         {:ok, window_target}
 
       {:error, reason} ->
-        {:error, {:window_creation_failed, reason}}
+        {:error, {:first_tab_failed, reason}}
     end
   end
 
