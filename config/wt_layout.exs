@@ -55,10 +55,6 @@ right_path = workspace_path.(local_config, [:right_path, :snakepit_path], fallba
       %{
         label: "Monitoring",
         command: ~s[cd #{right_path}]
-      },
-      %{
-        label: "Scratch",
-        command: ~s[cd #{right_path}]
       }
     ]
   }
