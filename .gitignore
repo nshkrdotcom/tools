@@ -13,3 +13,6 @@ erl_crash.dump
 # Mix
 .fetch
 mix.lock
+
+# Local Windows Terminal layout overrides
+config/wt_layout.local.exs

@@ -87,6 +87,8 @@ Runs actions on repositories in `repos_filtered.json`.
 | `elixir run.exs scan` | Scan for Elixir repos | `repos.json`, `repos_exclude.json` |
 | `elixir run.exs filter` | Filter repos | `repos_filtered.json` |
 | `elixir run.exs setup` | Run scan + filter | All JSON files |
+| `elixir launch_wt_erlexec.exs [N]` | Launch Windows Terminal layouts sized for 4K | `~/.config/wt_launcher/windows.exs` |
+| `elixir launch_wt_erlexec.exs --config [path]` | Launch Windows Terminal from a layout file | `~/.config/wt_launcher/windows.exs` |
 
 ### Action Commands
 
@@ -164,6 +166,23 @@ Template for creating custom actions.
   Processing: repo2
 ✓ Placeholder action complete
 ```
+
+## Windows Terminal Layout Launcher
+
+`launch_wt_erlexec.exs` automates Windows Terminal from WSL with two complementary workflows:
+
+- **Builtin tiling** – `elixir launch_wt_erlexec.exs` (or `… exs N`) tiles the full 3840×2160 desktop for `N = 2..24` windows. Widths are scaled so panes stay usable; heights stretch to fill the display. Each pane gets a named window and a placeholder tab ready for reuse.
+- **Config-driven** – `elixir launch_wt_erlexec.exs --config` reads a layout file (example: `config/wt_layout.exs`) that specifies per-window tabs, titles, profiles, positions, and modes. Override the file path with `WT_LAYOUT_CONFIG` or pass it inline.
+
+Every launch persists state to `~/.config/wt_launcher/windows.exs`, capturing UUIDs, window targets, pixel rectangles, and tab metadata. Use those targets later with `wt.exe -w <target>` to add, focus, or close tabs programmatically.
+
+To customize the default layout without editing tracked files, copy `config/wt_layout.local.example.exs` to `config/wt_layout.local.exs` (ignored by git) and set `left_path` / `right_path` to your preferred workspaces. Legacy keys such as `:nordic_road_path` and `:snakepit_path` are still recognized for compatibility.
+
+### Helpful Environment Switches
+
+- `WT_DRY_RUN=1` — Print the commands without opening Windows Terminal (great for validating layouts).
+- `WT_WSL_EXE`, `WT_BASH_EXE`, `WT_DEFAULT_COMMAND` — Override the executables/commands used inside tabs.
+- `WT_LAYOUT_CONFIG=/path/to/layout.exs` — Force a specific config file without supplying `--config`.
 
 ## Creating Custom Actions
 

@@ -6,24 +6,99 @@
 defmodule LaunchWTErlexec do
   @max_tab_attempts 8
   @retry_delay_ms 150
+  @screen_width_px 3840
+  @screen_height_px 2160
+  @full_cols 220
+  @full_rows 180
+  @pixels_per_col @screen_width_px / @full_cols
+  @pixels_per_row @screen_height_px / @full_rows
+  @min_cols 30
+  @min_rows 20
+  @default_window_count 2
+  @max_windows 24
 
   def run do
     wt_path = locate!("wt.exe")
 
-    case load_layout_config() do
-      {:ok, windows} ->
-        launch_layout(wt_path, windows)
+    case parse_launch_mode(System.argv()) do
+      {:builtin, count} ->
+        windows = build_builtin_layout(count)
+        launch_layout(wt_path, windows, %{mode: :builtin, window_count: count})
 
-      :no_layout ->
-        launch_default(wt_path)
+      {:config, path} ->
+        case parse_layout_config(path) do
+          {:ok, windows} ->
+            launch_layout(wt_path, windows, %{mode: :config, config_path: path})
+
+          :no_layout ->
+            IO.puts(:stderr, "Layout config #{path} yielded no windows; falling back to builtin.")
+            fallback_to_builtin(wt_path)
+
+          {:error, reason} ->
+            IO.puts(:stderr, "Failed to load layout config #{path}: #{inspect(reason)}")
+            fallback_to_builtin(wt_path)
+        end
 
       {:error, reason} ->
-        IO.puts(:stderr, "Failed to load layout config: #{inspect(reason)}")
-        launch_default(wt_path)
+        IO.puts(:stderr, "Invalid arguments: #{format_reason(reason)}")
+        fallback_to_builtin(wt_path)
     end
   end
 
-  defp launch_layout(wt_path, windows) do
+  defp parse_launch_mode(raw_args) do
+    raw_args
+    |> Enum.reject(&env_assignment?/1)
+    |> parse_launch_tokens()
+  end
+
+  defp env_assignment?(arg) when is_binary(arg) do
+    String.contains?(arg, "=")
+  end
+
+  defp env_assignment?(_), do: false
+
+  defp parse_launch_tokens([]), do: {:builtin, @default_window_count}
+
+  defp parse_launch_tokens(["--config"]), do: parse_launch_tokens(["--config", nil])
+  defp parse_launch_tokens(["-c"]), do: parse_launch_tokens(["-c", nil])
+
+  defp parse_launch_tokens(["--config", nil]) do
+    case default_config_path() do
+      {:ok, path} -> {:config, path}
+      :error -> {:error, :config_not_found}
+    end
+  end
+
+  defp parse_launch_tokens(["-c", nil]), do: parse_launch_tokens(["--config", nil])
+
+  defp parse_launch_tokens(["--config", path]) when is_binary(path) do
+    {:config, Path.expand(path)}
+  end
+
+  defp parse_launch_tokens(["-c", path]) when is_binary(path),
+    do: parse_launch_tokens(["--config", path])
+
+  defp parse_launch_tokens([count_str]), do: parse_count_argument(count_str, [])
+  defp parse_launch_tokens([count_str | rest]), do: parse_count_argument(count_str, rest)
+
+  defp parse_count_argument(count_str, rest) do
+    case Integer.parse(count_str) do
+      {count, ""} when count >= 2 and count <= @max_windows ->
+        if rest == [] do
+          {:builtin, count}
+        else
+          {:error, :unexpected_additional_arguments}
+        end
+
+      {count, ""} ->
+        {:error, {:unsupported_count, count}}
+
+      _ ->
+        {:error, {:invalid_count, count_str}}
+    end
+  end
+
+  defp launch_layout(wt_path, windows, metadata) do
     IO.puts("Launching Windows Terminal via #{wt_path}...")
 
     windows
@@ -37,7 +112,7 @@ defmodule LaunchWTErlexec do
     |> case do
       {:ok, infos} ->
         infos = Enum.reverse(infos)
-        persist_window_state(infos)
+        persist_window_state(infos, metadata)
         IO.puts("All windows opened successfully.")
         :ok
 
@@ -45,18 +120,6 @@ defmodule LaunchWTErlexec do
         IO.puts(:stderr, format_error(reason))
         System.halt(1)
     end
-  end
-
-  defp launch_default(wt_path) do
-    default_window = %{
-      label: "Default",
-      tabs: [
-        %{command: ~s[echo "elixir command!"]},
-        %{command: ~s[echo "elixir command!"]}
-      ]
-    }
-
-    launch_layout(wt_path, [default_window])
   end
 
   defp launch_window(wt_path, window, index) do
@@ -82,6 +145,7 @@ defmodule LaunchWTErlexec do
                target: window_target,
                resolved_target: target_for_tabs,
                label: window_name,
+               pixel_rect: window_pixel_rect(window),
                position: window_position(window),
                size: window_size(window),
                tabs: tab_summaries(tabs)
@@ -95,6 +159,274 @@ defmodule LaunchWTErlexec do
         {:error, {:window_failed, index, reason}}
     end
   end
+
+  defp fallback_to_builtin(wt_path) do
+    IO.puts("Falling back to builtin layout with #{@default_window_count} windows.")
+
+    windows = build_builtin_layout(@default_window_count)
+
+    launch_layout(wt_path, windows, %{
+      mode: :builtin,
+      window_count: @default_window_count,
+      fallback: true
+    })
+  end
+
+  defp build_builtin_layout(count) do
+    count
+    |> generate_rectangles()
+    |> Enum.with_index(1)
+    |> Enum.map(fn {rect, index} ->
+      label = "Window #{index}"
+      target = "auto-#{count}-w#{index}"
+
+      %{
+        name: target,
+        target: target,
+        uuid: builtin_uuid(count, index),
+        label: label,
+        position: %{x: rect.x, y: rect.y},
+        pixel_rect: rect,
+        size: %{cols: rect.cols, rows: rect.rows},
+        tabs: [
+          %{
+            label: label,
+            title: label,
+            command: nil
+          }
+        ]
+      }
+    end)
+  end
+
+  defp builtin_uuid(count, index) do
+    raw = :crypto.hash(:sha256, "#{count}:#{index}") |> Base.encode16(case: :lower)
+    "auto-#{String.slice(raw, 0, 12)}"
+  end
+
+  defp generate_rectangles(count) when count == 2 do
+    grid_layout([2])
+  end
+
+  defp generate_rectangles(count) when count == 3 do
+    grid_layout([3])
+  end
+
+  defp generate_rectangles(count) when count == 4 do
+    grid_layout([2, 2])
+  end
+
+  defp generate_rectangles(count) when count == 5 do
+    layout_five()
+  end
+
+  defp generate_rectangles(count) when count == 6 do
+    grid_layout([3, 3])
+  end
+
+  defp generate_rectangles(count) when count == 7 do
+    layout_seven()
+  end
+
+  defp generate_rectangles(count) when count == 8 do
+    grid_layout([4, 4])
+  end
+
+  defp generate_rectangles(count) when count == 9 do
+    grid_layout([3, 3, 3])
+  end
+
+  defp generate_rectangles(count) when count == 10 do
+    grid_layout([5, 5])
+  end
+
+  defp generate_rectangles(count) when count >= 11 and count <= @max_windows do
+    adaptive_layout(count)
+  end
+
+  defp layout_five do
+    column_units = [3, 4, 3]
+    column_widths = split_by_units(@screen_width_px, column_units)
+    half_heights = split_dimension(@screen_height_px, 2)
+
+    left_width = Enum.at(column_widths, 0)
+    center_width = Enum.at(column_widths, 1)
+    right_width = Enum.at(column_widths, 2)
+
+    top_height = Enum.at(half_heights, 0)
+    bottom_height = Enum.at(half_heights, 1)
+
+    [
+      %{x: 0, y: 0, width: left_width, height: top_height},
+      %{x: 0, y: top_height, width: left_width, height: bottom_height},
+      %{x: left_width, y: 0, width: center_width, height: @screen_height_px},
+      %{x: left_width + center_width, y: 0, width: right_width, height: top_height},
+      %{x: left_width + center_width, y: top_height, width: right_width, height: bottom_height}
+    ]
+    |> Enum.map(&decorate_rect/1)
+  end
+
+  defp layout_seven do
+    column_widths = split_dimension(@screen_width_px, 4)
+    row_heights = split_dimension(@screen_height_px, 2)
+
+    [w1, w2, w3, w4] = column_widths
+    [h1, h2] = row_heights
+
+    [
+      %{x: 0, y: 0, width: w1 + w2, height: h1},
+      %{x: w1 + w2, y: 0, width: w3, height: h1},
+      %{x: w1 + w2 + w3, y: 0, width: w4, height: h1},
+      %{x: 0, y: h1, width: w1, height: h2},
+      %{x: w1, y: h1, width: w2, height: h2},
+      %{x: w1 + w2, y: h1, width: w3, height: h2},
+      %{x: w1 + w2 + w3, y: h1, width: w4, height: h2}
+    ]
+    |> Enum.map(&decorate_rect/1)
+  end
+
+  defp adaptive_layout(count) do
+    cols = adaptive_columns(count)
+    rows = ceil_div(count, cols)
+    row_heights = split_dimension(@screen_height_px, rows)
+
+    Stream.unfold({0, 0, count}, fn
+      {_, _row_index, remaining} when remaining <= 0 ->
+        nil
+
+      {y_offset, row_index, remaining} ->
+        row_height = Enum.at(row_heights, row_index)
+        cols_in_row = min(cols, remaining)
+        widths = split_dimension(@screen_width_px, cols_in_row)
+
+        {row_rects, _} =
+          Enum.reduce(widths, {[], 0}, fn width, {acc, x_offset} ->
+            rect = %{x: x_offset, y: y_offset, width: width, height: row_height}
+            {[decorate_rect(rect) | acc], x_offset + width}
+          end)
+
+        {Enum.reverse(row_rects), {y_offset + row_height, row_index + 1, remaining - cols_in_row}}
+    end)
+    |> Enum.to_list()
+    |> List.flatten()
+    |> Enum.take(count)
+  end
+
+  defp adaptive_columns(count) do
+    ratio = @screen_width_px / @screen_height_px
+    cols = :math.sqrt(count * ratio) |> :math.ceil() |> trunc()
+    min(max(cols, 2), count)
+  end
+
+  defp grid_layout(row_columns) do
+    total_rows = length(row_columns)
+    row_heights = split_dimension(@screen_height_px, total_rows)
+
+    {rects, _} =
+      Enum.reduce(Enum.with_index(row_columns), {[], 0}, fn {cols_in_row, row_idx},
+                                                            {acc, y_offset} ->
+        row_height = Enum.at(row_heights, row_idx)
+        widths = split_dimension(@screen_width_px, cols_in_row)
+
+        {row_rects, _} =
+          Enum.reduce(widths, {[], 0}, fn width, {row_acc, x_offset} ->
+            rect = %{x: x_offset, y: y_offset, width: width, height: row_height}
+            {[decorate_rect(rect) | row_acc], x_offset + width}
+          end)
+
+        {acc ++ Enum.reverse(row_rects), y_offset + row_height}
+      end)
+
+    rects
+  end
+
+  defp decorate_rect(rect) do
+    cols = columns_from_width(rect.width)
+    rows = rows_from_height(rect.height)
+    Map.merge(rect, %{cols: cols, rows: rows})
+  end
+
+  defp columns_from_width(width_px) do
+    width_px
+    |> Kernel./(@pixels_per_col)
+    |> round()
+    |> max(@min_cols)
+  end
+
+  defp rows_from_height(height_px) do
+    height_px
+    |> Kernel./(@pixels_per_row)
+    |> round()
+    |> max(@min_rows)
+  end
+
+  defp split_dimension(size, parts) when parts > 0 do
+    base = div(size, parts)
+    remainder = rem(size, parts)
+
+    Enum.map(0..(parts - 1), fn index ->
+      if index < remainder do
+        base + 1
+      else
+        base
+      end
+    end)
+  end
+
+  defp split_dimension(_size, _parts), do: []
+
+  defp split_by_units(size, units_list) do
+    total_units = Enum.sum(units_list)
+
+    units_list
+    |> Enum.map(fn units -> units * size / total_units end)
+    |> distribute_remainder(size)
+  end
+
+  defp distribute_remainder(raw_sizes, target_sum) do
+    floors = Enum.map(raw_sizes, &Float.floor/1)
+    floor_sum = Enum.sum(floors)
+    difference = round(target_sum - floor_sum)
+
+    indexed =
+      raw_sizes
+      |> Enum.zip(floors)
+      |> Enum.with_index()
+
+    adjust_indexes =
+      cond do
+        difference > 0 ->
+          indexed
+          |> Enum.sort_by(fn {{raw, floor}, _index} -> raw - floor end, :desc)
+          |> Enum.take(difference)
+          |> Enum.map(fn {_pair, index} -> index end)
+          |> MapSet.new()
+
+        difference < 0 ->
+          indexed
+          |> Enum.sort_by(fn {{raw, floor}, _index} -> raw - floor end, :asc)
+          |> Enum.take(-difference)
+          |> Enum.map(fn {_pair, index} -> index end)
+          |> MapSet.new()
+
+        true ->
+          MapSet.new()
+      end
+
+    floors
+    |> Enum.with_index()
+    |> Enum.map(fn {value, index} ->
+      base = trunc(value)
+
+      cond do
+        difference > 0 and MapSet.member?(adjust_indexes, index) -> base + 1
+        difference < 0 and MapSet.member?(adjust_indexes, index) -> max(base - 1, 1)
+        true -> base
+      end
+    end)
+  end
+
+  defp ceil_div(a, b), do: div(a + b - 1, b)
 
   defp create_window_with_first_tab(wt_path, window_target, tab, launch_args) do
     IO.puts("  - Tab 1: #{command_label(tab)}")
@@ -372,6 +704,21 @@ defmodule LaunchWTErlexec do
     end
   end
 
+  defp window_pixel_rect(window) do
+    case fetch_field(window, :pixel_rect) do
+      %{} = rect ->
+        %{
+          x: normalize_integer(fetch_field(rect, :x)),
+          y: normalize_integer(fetch_field(rect, :y)),
+          width: normalize_integer(fetch_field(rect, :width)),
+          height: normalize_integer(fetch_field(rect, :height))
+        }
+
+      _ ->
+        nil
+    end
+  end
+
   defp window_launch_switches(window) do
     []
     |> maybe_append_position(window_position(window))
@@ -404,7 +751,17 @@ defmodule LaunchWTErlexec do
   end
 
   defp normalize_point(%{} = map) do
-    {normalize_integer(fetch_field(map, :x)), normalize_integer(fetch_field(map, :y))}
+    first =
+      fetch_field(map, :x) ||
+        fetch_field(map, :cols) ||
+        fetch_field(map, :width)
+
+    second =
+      fetch_field(map, :y) ||
+        fetch_field(map, :rows) ||
+        fetch_field(map, :height)
+
+    {normalize_integer(first), normalize_integer(second)}
   end
 
   defp normalize_point(value) do
@@ -482,24 +839,16 @@ defmodule LaunchWTErlexec do
 
   defp fetch_field(_map, _key), do: nil
 
-  defp layout_config_path do
-    Path.expand("config/wt_layout.exs", File.cwd!())
-  end
-
-  defp active_layout_path do
-    override = System.get_env("WT_LAYOUT_CONFIG")
-
+  defp default_config_path do
     cond do
-      override && override != "" -> Path.expand(override)
-      File.exists?(layout_config_path()) -> layout_config_path()
-      true -> nil
-    end
-  end
+      path = System.get_env("WT_LAYOUT_CONFIG") ->
+        {:ok, Path.expand(path)}
 
-  defp load_layout_config do
-    case active_layout_path() do
-      nil -> :no_layout
-      path -> parse_layout_config(path)
+      File.exists?(Path.expand("config/wt_layout.exs", File.cwd!())) ->
+        {:ok, Path.expand("config/wt_layout.exs", File.cwd!())}
+
+      true ->
+        :error
     end
   end
 
@@ -563,12 +912,17 @@ defmodule LaunchWTErlexec do
 
   defp normalize_window_entry(_), do: {:error, :unsupported_window_definition}
 
-  defp persist_window_state([]), do: :ok
+  defp persist_window_state([], _metadata), do: :ok
 
-  defp persist_window_state(windows) do
+  defp persist_window_state(windows, metadata) do
+    metadata =
+      metadata
+      |> normalize_metadata()
+      |> Map.put_new(:window_count, length(windows))
+
     state = %{
       generated_at: DateTime.utc_now() |> DateTime.to_iso8601(),
-      layout_config: active_layout_path(),
+      metadata: metadata,
       windows: windows
     }
 
@@ -584,6 +938,18 @@ defmodule LaunchWTErlexec do
       IO.puts(:stderr, "Warning: Unable to persist window state (#{inspect(error)}).")
       :ok
   end
+
+  defp normalize_metadata(nil), do: %{}
+  defp normalize_metadata(map) when is_map(map), do: map
+
+  defp normalize_metadata(list) when is_list(list) do
+    Enum.reduce(list, %{}, fn
+      {key, value}, acc -> Map.put(acc, key, value)
+      other, acc -> Map.put(acc, inspect(other), other)
+    end)
+  end
+
+  defp normalize_metadata(other), do: %{value: inspect(other)}
 
   defp state_path do
     Path.join([System.user_home!(), ".config", "wt_launcher", "windows.exs"])
