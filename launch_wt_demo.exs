@@ -26,10 +26,11 @@ commands
   args =
     case {index, maybe_command} do
       {0, nil} ->
-        ["new-tab", "wsl"]
+        # Use new-window so we don't get an extra default tab when wt.exe boots up.
+        ["new-window", "wsl"]
 
       {0, command} ->
-        ["new-tab", "wsl", "--", "bash", "-lc", "#{String.trim(command)}; exec bash"]
+        ["new-window", "wsl", "--", "bash", "-lc", "#{String.trim(command)}; exec bash"]
 
       {_, nil} ->
         ["-w", "0", "new-tab", "wsl"]
