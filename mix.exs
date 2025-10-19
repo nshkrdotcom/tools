@@ -21,7 +21,8 @@ defmodule Tools.MixProject do
     [
       {:jason, "~> 1.4"},
       {:gemini_ex, "~> 0.1.0"},
-      {:claude_code_sdk_elixir, "~> 0.1.0"}
+      {:claude_code_sdk_elixir, "~> 0.1.0"},
+      {:erlexec, "~> 2.0"}
     ]
   end
 end
