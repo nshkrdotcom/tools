@@ -4,6 +4,7 @@ repos_exclude.json
 repos_filtered.json
 
 # Elixir
+/doc/
 /_build/
 /deps/
 /*.ez
